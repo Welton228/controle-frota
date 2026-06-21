@@ -54,20 +54,24 @@ model VerificationToken {
 // ==========================================
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
+  id              String    @id @default(cuid())
+  name            String?
+  email           String?   @unique
+  emailVerified   DateTime?
+  image           String?
+  phone           String?   // Para envio de alertas via WhatsApp
+  zonaAtendimento String? 
   
-  // Controle de segurança para ex-funcionários
-  status        String    @default("ATIVO") // "ATIVO" ou "INATIVO"
+  status          String    @default("ATIVO")
   
-  // Relações (O que esse usuário cadastrou no sistema)
-  accounts      Account[]
-  sessions      Session[]
-  maintenances  Maintenance[]
-  mileages      MileageLog[]
+  // Relações
+  accounts        Account[]
+  sessions        Session[]
+  maintenances    Maintenance[]
+  mileages        MileageLog[]
+  fuelLogs        FuelLog[]     
+  vehicles        Vehicle[]     
+  assignments     VehicleAssignment[] // Novo: Histórico de carros que este usuário dirigiu
 }
 
 // ==========================================
@@ -75,45 +79,133 @@ model User {
 // ==========================================
 
 model Vehicle {
-  id           String        @id @default(cuid())
-  placa        String        @unique
-  modelo       String
-  ano          Int?
-  status       String        @default("DISPONIVEL") // DISPONIVEL, MANUTENCAO, INATIVO
+  id        String   @id @default(cuid())
+  placa     String   @unique
+  modelo    String
+  ano       Int?
+  status    String   @default("DISPONIVEL")
   
-  // Relações
+  // Campo para filtragem por zona (ex: 10, 28)
+  zona      Int?     
+
+  // Relação com o motorista (User)
+  driverId  String?
+  driver    User?    @relation(fields: [driverId], references: [id])
+  
+  // Histórico de atribuições (Quem dirigiu o que)
+  assignments  VehicleAssignment[] 
+  
+  // Relações que alimentam o seu novo Dashboard de Histórico
+  // O Prisma usará estas listas para calcular gastos e manutenções
   maintenances Maintenance[]
   mileages     MileageLog[]
+  fuelLogs     FuelLog[]   
   
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
+// ==========================================
+// NOVO: HISTÓRICO DE ATRIBUIÇÃO (AUDITORIA)
+// ==========================================
+
+// No seu schema.prisma
+model VehicleAssignment {
+  id        String    @id @default(cuid())
+  vehicleId String
+  userId    String
+  startDate DateTime  @default(now())
+  endDate   DateTime? // Se estiver null, é o motorista atual
+  reason    String?   
+  
+  vehicle   Vehicle   @relation(fields: [vehicleId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([vehicleId, endDate])
+}
+
+// ==========================================
+// LOGS DE OPERAÇÃO
+// ==========================================
+
 model Maintenance {
-  id          String   @id @default(cuid())
-  descricao   String   // Ex: "Troca de óleo, filtro e alinhamento"
-  valor       Float?   // Custo do serviço
-  tipo        String   // PREVENTIVA ou CORRETIVA
-  data        DateTime @default(now()) // Data em que o serviço foi feito
-  kmNoMomento Int      // Quilometragem exata do carro no dia da manutenção
+  id             String   @id @default(cuid())
+  descricao      String
+  valor          Float?
+  tipo           String
+  kmNoMomento    Int
   
-  // Chaves Estrangeiras
-  vehicleId   String
-  userId      String
+  // Datas e status
+  dataManutencao DateTime @default(now())
+  dataPrevisao   DateTime @default(now())
+  concluido      Boolean  @default(false)
   
-  vehicle     Vehicle  @relation(fields: [vehicleId], references: [id])
-  user        User     @relation(fields: [userId], references: [id])
+  // Campo mantido para retrocompatibilidade
+  data           DateTime @default(now())
+
+  // Chaves estrangeiras
+  vehicleId      String
+  userId         String
+  
+  // Relacionamentos existentes
+  vehicle        Vehicle  @relation(fields: [vehicleId], references: [id])
+  user           User     @relation(fields: [userId], references: [id])
+  
+  // Novo relacionamento: Uma manutenção pode ter vários documentos anexados (XML, PDF, Imagens)
+  attachments    Document[]
+
+  @@map("maintenance")
+}
+
+model Document {
+  id            String      @id @default(cuid())
+  url           String      // URL do arquivo no Supabase Storage
+  fileName      String      // Nome original do arquivo
+  fileType      String      // Ex: 'PDF', 'XML'
+  createdAt     DateTime    @default(now())
+
+  // Relacionamento com a manutenção
+  maintenanceId String
+  maintenance   Maintenance @relation(fields: [maintenanceId], references: [id], onDelete: Cascade)
+
+  @@map("document")
 }
 
 model MileageLog {
+  id      String   @id @default(cuid())
+  kmAtual Int
+  data    DateTime @default(now())
+  
+  vehicleId String
+  userId    String
+  
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+model FuelLog {
   id          String   @id @default(cuid())
-  kmAtual     Int      // Registro de quilometragem rotineira
-  data        DateTime @default(now())
   
-  // Chaves Estrangeiras
+  // Dados de abastecimento
+  litros      Float    // Quantidade em litros
+  valorTotal  Float    // Valor pago (Garantiremos no código que não seja negativo)
+  kmNoMomento Int      // Quilometragem do veículo no ato do abastecimento
+  data        DateTime @default(now()) // Data real do abastecimento
+  
+  // Relações com outras tabelas
   vehicleId   String
-  userId      String
+  userId      String   
   
+  // Referências para o Prisma criar o relacionamento
   vehicle     Vehicle  @relation(fields: [vehicleId], references: [id])
   user        User     @relation(fields: [userId], references: [id])
+
+  // Campos de Auditoria (Essenciais para um sistema SaaS)
+  createdAt   DateTime @default(now()) // Quando o registro foi criado no sistema
+  updatedAt   DateTime @updatedAt      // Quando foi editado pela última vez
+
+  // Índices para performance: Isso fará com que as buscas por veículo e usuário 
+  // no Dashboard sejam instantâneas, mesmo com milhares de registros.
+  @@index([vehicleId])
+  @@index([userId])
 }
